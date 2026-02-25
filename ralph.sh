@@ -1,12 +1,16 @@
 #!/bin/bash
 # Ralph Wiggum - Long-running AI agent loop
-# Usage: ./ralph.sh [--tool amp|claude] [max_iterations]
+# Usage: ./ralph.sh [--tool amp|claude|codex] [--codex-mode suggest|auto-edit|full-auto] [--codex-runner cli|exec] [--codex-profile name] [max_iterations]
 
 set -e
 
 # Parse arguments
 TOOL="amp"  # Default to amp for backwards compatibility
 MAX_ITERATIONS=10
+CODEX_MODE="${CODEX_MODE:-full-auto}"
+CODEX_RUNNER="${CODEX_RUNNER:-cli}"
+CODEX_PROFILE="${CODEX_PROFILE:-}"
+CODEX_EXTRA_ARGS="${CODEX_EXTRA_ARGS:-}"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -16,6 +20,42 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tool=*)
       TOOL="${1#*=}"
+      shift
+      ;;
+    --codex-mode)
+      CODEX_MODE="$2"
+      shift 2
+      ;;
+    --codex-mode=*)
+      CODEX_MODE="${1#*=}"
+      shift
+      ;;
+    --codex-profile)
+      CODEX_PROFILE="$2"
+      shift 2
+      ;;
+    --codex-profile=*)
+      CODEX_PROFILE="${1#*=}"
+      shift
+      ;;
+    --codex-runner)
+      CODEX_RUNNER="$2"
+      shift 2
+      ;;
+    --codex-runner=*)
+      CODEX_RUNNER="${1#*=}"
+      shift
+      ;;
+    --codex-exec)
+      CODEX_RUNNER="exec"
+      shift
+      ;;
+    --codex-extra-args)
+      CODEX_EXTRA_ARGS="$2"
+      shift 2
+      ;;
+    --codex-extra-args=*)
+      CODEX_EXTRA_ARGS="${1#*=}"
       shift
       ;;
     *)
@@ -29,9 +69,28 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Validate tool choice
-if [[ "$TOOL" != "amp" && "$TOOL" != "claude" ]]; then
-  echo "Error: Invalid tool '$TOOL'. Must be 'amp' or 'claude'."
+if [[ "$TOOL" != "amp" && "$TOOL" != "claude" && "$TOOL" != "codex" ]]; then
+  echo "Error: Invalid tool '$TOOL'. Must be 'amp', 'claude', or 'codex'."
   exit 1
+fi
+
+# Validate Codex mode
+if [[ "$TOOL" == "codex" ]]; then
+  if [[ -z "$CODEX_PROFILE" ]]; then
+    CODEX_PROFILE="ralph_workspace_write"
+  fi
+  if [[ "$CODEX_MODE" != "suggest" && "$CODEX_MODE" != "auto-edit" && "$CODEX_MODE" != "full-auto" ]]; then
+    echo "Error: Invalid Codex mode '$CODEX_MODE'. Must be 'suggest', 'auto-edit', or 'full-auto'."
+    exit 1
+  fi
+  if [[ "$CODEX_RUNNER" != "cli" && "$CODEX_RUNNER" != "exec" ]]; then
+    echo "Error: Invalid Codex runner '$CODEX_RUNNER'. Must be 'cli' or 'exec'."
+    exit 1
+  fi
+  if [[ "$CODEX_RUNNER" == "exec" && "$CODEX_MODE" == "auto-edit" ]]; then
+    echo "Error: Codex runner 'exec' does not support 'auto-edit'. Use 'suggest' or 'full-auto'."
+    exit 1
+  fi
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRD_FILE="$SCRIPT_DIR/prd.json"
@@ -90,9 +149,36 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   # Run the selected tool with the ralph prompt
   if [[ "$TOOL" == "amp" ]]; then
     OUTPUT=$(cat "$SCRIPT_DIR/prompt.md" | amp --dangerously-allow-all 2>&1 | tee /dev/stderr) || true
-  else
+  elif [[ "$TOOL" == "claude" ]]; then
     # Claude Code: use --dangerously-skip-permissions for autonomous operation, --print for output
     OUTPUT=$(claude --dangerously-skip-permissions --print < "$SCRIPT_DIR/CLAUDE.md" 2>&1 | tee /dev/stderr) || true
+  else
+    # Codex CLI: select autonomy mode and optional profile. Reads prompt from stdin.
+    CODEX_ARGS=()
+    if [[ "$CODEX_RUNNER" == "exec" ]]; then
+      # codex exec supports full-auto; suggest is the default when omitted.
+      if [[ "$CODEX_MODE" == "full-auto" ]]; then
+        CODEX_ARGS+=(--full-auto)
+      fi
+    else
+      if [[ "$CODEX_MODE" == "auto-edit" ]]; then
+        CODEX_ARGS+=(--auto-edit)
+      elif [[ "$CODEX_MODE" == "full-auto" ]]; then
+        CODEX_ARGS+=(--full-auto)
+      fi
+    fi
+    if [[ -n "$CODEX_PROFILE" ]]; then
+      CODEX_ARGS+=(--profile "$CODEX_PROFILE")
+    fi
+    if [[ -n "$CODEX_EXTRA_ARGS" ]]; then
+      read -r -a CODEX_EXTRA_ARRAY <<< "$CODEX_EXTRA_ARGS"
+      CODEX_ARGS+=("${CODEX_EXTRA_ARRAY[@]}")
+    fi
+    if [[ "$CODEX_RUNNER" == "exec" ]]; then
+      OUTPUT=$(cat "$SCRIPT_DIR/CODEX.md" | codex exec "${CODEX_ARGS[@]}" - 2>&1 | tee /dev/stderr) || true
+    else
+      OUTPUT=$(cat "$SCRIPT_DIR/CODEX.md" | codex "${CODEX_ARGS[@]}" 2>&1 | tee /dev/stderr) || true
+    fi
   fi
   
   # Check for completion signal
